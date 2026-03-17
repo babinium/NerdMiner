@@ -43,6 +43,7 @@ stats = {
 
 # --- Stratum Client Logic ---
 def stratum_client(wallet, update_queue, job_queue, submit_queue):
+    extranonce1 = None
     while True:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -50,7 +51,17 @@ def stratum_client(wallet, update_queue, job_queue, submit_queue):
             sock.connect((POOL_URL, POOL_PORT))
             
             f = sock.makefile('r', encoding='utf-8')
+            
+            # Subscribe
             sock.sendall(json.dumps({"id": 1, "method": "mining.subscribe", "params": []}).encode() + b'\n')
+            line = f.readline()
+            if line:
+                resp = json.loads(line)
+                if resp.get("result"):
+                    extranonce1 = resp["result"][1]
+                    # update_queue.put(("status", f"Extranonce1: {extranonce1}"))
+
+            # Authorize
             sock.sendall(json.dumps({"id": 2, "method": "mining.authorize", "params": [wallet, "x"]}).encode() + b'\n')
 
             update_queue.put(("status", "Conectado"))
@@ -68,7 +79,7 @@ def stratum_client(wallet, update_queue, job_queue, submit_queue):
                             "params": [wallet, sub_msg[0], sub_msg[1], sub_msg[2], sub_msg[3]]
                         }
                         sock.sendall(json.dumps(submit_payload).encode() + b'\n')
-                        update_queue.put(("status", "BLOQUE ENVIADO!"))
+                        update_queue.put(("status", "SOLUCION ENVIADA!"))
                 except Exception: pass
 
                 # Read from socket
@@ -77,8 +88,11 @@ def stratum_client(wallet, update_queue, job_queue, submit_queue):
                     if line:
                         msg = json.loads(line)
                         if msg.get("method") == "mining.notify":
-                            job_queue.put(msg["params"])
-                            update_queue.put(("block", msg["params"][0]))
+                            # Pass extranonce1 to workers via job params
+                            job_params = list(msg["params"])
+                            job_params.append(extranonce1)
+                            job_queue.put(job_params)
+                            update_queue.put(("block", job_params[0]))
                             update_queue.put(("status", "Minando"))
                         elif msg.get("method") == "mining.set_difficulty":
                             update_queue.put(("difficulty", msg["params"][0]))
@@ -93,11 +107,17 @@ def stratum_client(wallet, update_queue, job_queue, submit_queue):
         
         time.sleep(5)
 
+# --- Crypto Utils ---
+def reverse_bytes(hex_str):
+    return "".join([hex_str[i:i+2] for i in range(len(hex_str)-2, -1, -2)])
+
+def sha256d(data):
+    return hashlib.sha256(hashlib.sha256(data).digest()).digest()
+
 # --- Hashing Worker ---
 def hash_worker(job_queue, update_queue, submit_queue, intensity):
     target_ratio = intensity / 100.0
     current_job = None
-    target = 0x00000000FFFF0000000000000000000000000000000000000000000000000000 # Default Diff 1
     
     while True:
         try:
@@ -111,36 +131,66 @@ def hash_worker(job_queue, update_queue, submit_queue, intensity):
                 time.sleep(0.1)
                 continue
 
-            # Stratum job params: [job_id, prevhash, coinb1, coinb2, merkle_branch, version, nbits, ntime, clean_jobs]
-            job_id = current_job[0]
-            prevhash = current_job[1]
-            ntime = current_job[7]
+            # Stratum job params + extranonce1 (appended by client)
+            # [job_id, prevhash, coinb1, coinb2, merkle_branch, version, nbits, ntime, clean_jobs, extranonce1]
+            if len(current_job) < 10:
+                time.sleep(0.1)
+                continue
+                
+            job_id, prevhash, coinb1, coinb2, merkle_branch, version, nbits, ntime, _, enonce1 = current_job
+            
+            if enonce1 is None:
+                time.sleep(0.1)
+                continue
+            
+            # Target from nbits (Simplified for TUI, real would be more precise)
+            # nbits is often in hex string from stratum
+            exponent = int(nbits[-2:], 16)
+            mantissa = int(nbits[:-2], 16)
+            target = mantissa * (2 ** (8 * (exponent - 3)))
+            
+            # Reference for Luck bar (Diff 1)
+            t1 = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
+            
+            # Extranonce2 (4 bytes hex)
+            enonce2 = f"{int(time.time() * 1000) % 0xFFFFFFFF:08x}"
+            
+            # 1. Build Merkle Root
+            coinbase = bytes.fromhex(coinb1 + enonce1 + enonce2 + coinb2)
+            merkle_root = sha256d(coinbase)
+            
+            for branch in merkle_branch:
+                merkle_root = sha256d(merkle_root + bytes.fromhex(branch))
+            
+            # 2. Build Header (80 bytes)
+            # Little-endian parts
+            version_le = bytes.fromhex(reverse_bytes(version))
+            prevhash_le = bytes.fromhex(reverse_bytes(prevhash))
+            merkle_le = merkle_root
+            ntime_le = bytes.fromhex(reverse_bytes(ntime))
+            nbits_le = bytes.fromhex(reverse_bytes(nbits))
             
             chunk_size = 1000
             start_work = time.time()
-            start_nonce = int(start_work * 1337) % 0xFFFFFFFF
-            
+            start_nonce = int(start_work * 10000) % 0xFFFFFFFF
             max_chunk_diff = 1e-15
-            t1 = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
             
             for i in range(chunk_size):
                 nonce = (start_nonce + i) % 0xFFFFFFFF
-                # Simplified header for demonstration - real stratum would use full coinbase/merkle
-                # To be a 'real' miner we should ideally build the full header, but here we 
-                # keep the simplified logic for speed in the TUI demo while adding the 'win' trigger
-                header_sim = f"{prevhash}{nonce:08x}".encode()
-                h = hashlib.sha256(hashlib.sha256(header_sim).digest()).digest()
+                nonce_le = nonce.to_bytes(4, 'little')
                 
-                hash_int = int.from_bytes(h, 'big')
+                header = version_le + prevhash_le + merkle_le + ntime_le + nbits_le + nonce_le
+                h = sha256d(header)
+                
+                hash_int = int.from_bytes(h, 'little') # Bitcoin hashes are checked in little-endian
+                
                 if hash_int > 0:
                     diff = t1 / hash_int
                     if diff > max_chunk_diff: max_chunk_diff = diff
                     
-                    # SI EL HASH ES MENOR AL TARGET (Network target simplificado)
-                    # En un minero real compararíamos contra el target de ckpool
-                    if hash_int < (t1 / 1000): # Detección simbólica de 'share' para demos
-                        # submit_queue.put((job_id, "00000000", ntime, f"{nonce:08x}"))
-                        update_queue.put(("status", "Share !"))
+                    if hash_int < target:
+                        submit_queue.put((job_id, enonce2, ntime, f"{nonce:08x}"))
+                        update_queue.put(("status", "SOLUCION ENCONTRADA!"))
 
             update_queue.put(("hash", chunk_size))
             update_queue.put(("diff_score", max_chunk_diff))
