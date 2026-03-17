@@ -1,0 +1,2 @@
+wallet=bc1qj7cfv9hvxvrfueteng87vct7mmsuzcgy9xzn42
+intensity=50
