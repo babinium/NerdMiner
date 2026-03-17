@@ -143,11 +143,14 @@ def hash_worker(job_queue, update_queue, submit_queue, intensity):
                 time.sleep(0.1)
                 continue
             
-            # Target from nbits (Simplified for TUI, real would be more precise)
-            # nbits is often in hex string from stratum
-            exponent = int(nbits[-2:], 16)
-            mantissa = int(nbits[:-2], 16)
-            target = mantissa * (2 ** (8 * (exponent - 3)))
+            # Target from nbits (Standard Bitcoin Difficulty encoding)
+            # nbits is a 4-byte hex string: [exponent (1 byte)][mantissa (3 bytes)]
+            try:
+                exponent = int(nbits[:2], 16)
+                mantissa = int(nbits[2:], 16)
+                target = mantissa * (2 ** (8 * (exponent - 3)))
+            except Exception:
+                target = 0x00000000FFFF000000000000000000000000000000000000000000000000 # Fallback 
             
             # Reference for Luck bar (Diff 1)
             t1 = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
@@ -182,7 +185,8 @@ def hash_worker(job_queue, update_queue, submit_queue, intensity):
                 header = version_le + prevhash_le + merkle_le + ntime_le + nbits_le + nonce_le
                 h = sha256d(header)
                 
-                hash_int = int.from_bytes(h, 'little') # Bitcoin hashes are checked in little-endian
+                # Para la comparación numérica, usamos Big-Endian (valor real del hash)
+                hash_int = int.from_bytes(h, 'big')
                 
                 if hash_int > 0:
                     diff = t1 / hash_int
