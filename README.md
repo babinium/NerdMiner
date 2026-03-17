@@ -1,6 +1,6 @@
 # 🚀 NerdMiner Babinium
 
-NerdMiner Babinium es un simulador de minería de Bitcoin desarrollado en Python. Este proyecto está diseñado para mostrar estadísticas de minería en tiempo real directamente en tu terminal, con una interfaz visual moderna y dinámica.
+NerdMiner Babinium es un **Minero de Lotería Solo (Lottery Miner)** real desarrollado en Python. Este proyecto está diseñado para intentar encontrar bloques de Bitcoin de forma individual, procesando datos reales de la red y mostrando estadísticas en tiempo real directamente en tu terminal.
 
 ![Captura de pantalla](captura.png)
 
