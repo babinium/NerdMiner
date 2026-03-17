@@ -270,7 +270,6 @@ def draw_ui(stdscr, update_queue, intensity):
 
     start_time   = time.time()
     hashes       = 0
-    best_diff    = 1e-15
     cur_diff     = 1e-15
     status       = "Iniciando..."
     block_id     = "-------"
@@ -298,8 +297,6 @@ def draw_ui(stdscr, update_queue, intensity):
                     hashes_since += count
                 elif msg_type == "diff_score":
                     cur_diff = float(val)
-                    if cur_diff > best_diff:
-                        best_diff = cur_diff
             except Exception:
                 break
 
@@ -318,7 +315,7 @@ def draw_ui(stdscr, update_queue, intensity):
 
         # Barra de Suerte
         luck_len  = 24
-        log_best  = math.log10(max(1e-15, best_diff))
+        log_best  = math.log10(max(1e-15, cur_diff))
         log_min   = -15.0
         log_max   = math.log10(REF_DIFF)
         progress  = (log_best - log_min) / (log_max - log_min)
@@ -391,13 +388,6 @@ def draw_ui(stdscr, update_queue, intensity):
 
             # CPU
             stdscr.addstr(8, 2, f"CPU:    {intensity}%")
-
-            # Mejor dificultad
-            if best_diff >= 1:
-                best_str = f"{best_diff:.2e}"
-            else:
-                best_str = f"{best_diff:.2e}"
-            stdscr.addstr(9, 2, f"Mejor:  {best_str}")
 
             # Estado
             color = curses.color_pair(3) if "SOLUCION" in status else curses.color_pair(4)
