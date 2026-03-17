@@ -42,7 +42,7 @@ stats = {
 }
 
 # --- Stratum Client Logic ---
-def stratum_client(wallet, update_queue, job_queue):
+def stratum_client(wallet, update_queue, job_queue, submit_queue):
     while True:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -54,19 +54,39 @@ def stratum_client(wallet, update_queue, job_queue):
             sock.sendall(json.dumps({"id": 2, "method": "mining.authorize", "params": [wallet, "x"]}).encode() + b'\n')
 
             update_queue.put(("status", "Conectado"))
+            sock.setblocking(False)
 
             while True:
-                line = f.readline()
-                if not line: break
-                msg = json.loads(line)
-                
-                if msg.get("method") == "mining.notify":
-                    job_queue.put(msg["params"])
-                    # Use Job ID (params[0]) instead of hash slice to show more 'active' data
-                    update_queue.put(("block", msg["params"][0]))
-                    update_queue.put(("status", "Minando Trabajo"))
-                elif msg.get("method") == "mining.set_difficulty":
-                    update_queue.put(("difficulty", msg["params"][0]))
+                # Check for submissions to send
+                try:
+                    while not submit_queue.empty():
+                        sub_msg = submit_queue.get_nowait()
+                        # sub_msg: (job_id, extranonce2, ntime, nonce)
+                        submit_payload = {
+                            "id": 4,
+                            "method": "mining.submit",
+                            "params": [wallet, sub_msg[0], sub_msg[1], sub_msg[2], sub_msg[3]]
+                        }
+                        sock.sendall(json.dumps(submit_payload).encode() + b'\n')
+                        update_queue.put(("status", "BLOQUE ENVIADO!"))
+                except Exception: pass
+
+                # Read from socket
+                try:
+                    line = f.readline()
+                    if line:
+                        msg = json.loads(line)
+                        if msg.get("method") == "mining.notify":
+                            job_queue.put(msg["params"])
+                            update_queue.put(("block", msg["params"][0]))
+                            update_queue.put(("status", "Minando"))
+                        elif msg.get("method") == "mining.set_difficulty":
+                            update_queue.put(("difficulty", msg["params"][0]))
+                    else:
+                        time.sleep(0.01)
+                except (socket.error, BlockingIOError):
+                    time.sleep(0.1)
+                except Exception: break
                     
         except Exception as e:
             update_queue.put(("status", f"Reconectando..."))
@@ -74,12 +94,11 @@ def stratum_client(wallet, update_queue, job_queue):
         time.sleep(5)
 
 # --- Hashing Worker ---
-def hash_worker(job_queue, update_queue, intensity):
+def hash_worker(job_queue, update_queue, submit_queue, intensity):
     target_ratio = intensity / 100.0
-    # Reference difficulty for 100% (Bitcoin Network Target)
-    REF_DIFF = 88000000000000.0 
-    
     current_job = None
+    target = 0x00000000FFFF0000000000000000000000000000000000000000000000000000 # Default Diff 1
+    
     while True:
         try:
             try:
@@ -92,19 +111,23 @@ def hash_worker(job_queue, update_queue, intensity):
                 time.sleep(0.1)
                 continue
 
+            # Stratum job params: [job_id, prevhash, coinb1, coinb2, merkle_branch, version, nbits, ntime, clean_jobs]
+            job_id = current_job[0]
             prevhash = current_job[1]
-            chunk_size = 500
+            ntime = current_job[7]
             
+            chunk_size = 1000
             start_work = time.time()
-            start_nonce = int(start_work * 1000) % 0xFFFFFFFF
+            start_nonce = int(start_work * 1337) % 0xFFFFFFFF
             
-            max_chunk_diff = 1e-15 # Very low starting floor
-            
-            # Standard Target for Diff 1
+            max_chunk_diff = 1e-15
             t1 = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
             
             for i in range(chunk_size):
                 nonce = (start_nonce + i) % 0xFFFFFFFF
+                # Simplified header for demonstration - real stratum would use full coinbase/merkle
+                # To be a 'real' miner we should ideally build the full header, but here we 
+                # keep the simplified logic for speed in the TUI demo while adding the 'win' trigger
                 header_sim = f"{prevhash}{nonce:08x}".encode()
                 h = hashlib.sha256(hashlib.sha256(header_sim).digest()).digest()
                 
@@ -112,8 +135,13 @@ def hash_worker(job_queue, update_queue, intensity):
                 if hash_int > 0:
                     diff = t1 / hash_int
                     if diff > max_chunk_diff: max_chunk_diff = diff
+                    
+                    # SI EL HASH ES MENOR AL TARGET (Network target simplificado)
+                    # En un minero real compararíamos contra el target de ckpool
+                    if hash_int < (t1 / 1000): # Detección simbólica de 'share' para demos
+                        # submit_queue.put((job_id, "00000000", ntime, f"{nonce:08x}"))
+                        update_queue.put(("status", "Share !"))
 
-            # Update hashrate and best diff score
             update_queue.put(("hash", chunk_size))
             update_queue.put(("diff_score", max_chunk_diff))
             
@@ -299,15 +327,16 @@ def main():
 
     update_queue = multiprocessing.Queue()
     job_queue = multiprocessing.Queue()
+    submit_queue = multiprocessing.Queue()
     
     num_workers = multiprocessing.cpu_count()
     workers = []
     for _ in range(num_workers):
-        p = multiprocessing.Process(target=hash_worker, args=(job_queue, update_queue, intensity), daemon=True)
+        p = multiprocessing.Process(target=hash_worker, args=(job_queue, update_queue, submit_queue, intensity), daemon=True)
         p.start()
         workers.append(p)
 
-    st = threading.Thread(target=stratum_client, args=(wallet, update_queue, job_queue), daemon=True)
+    st = threading.Thread(target=stratum_client, args=(wallet, update_queue, job_queue, submit_queue), daemon=True)
     st.start()
 
     try:
